@@ -74,12 +74,14 @@ void main() {
     expect(app.make<ThothServer>(), same(app.make<ThothServer>()));
   });
 
-  test('service provider rejects missing app credentials', () async {
+  test('server refuses to start with missing app credentials', () async {
+    final app = await Application.configure(basePath: Directory.current.path)
+        .withConfig({'thoth': <String, Object?>{}})
+        .withProviders([ThothServiceProvider.new])
+        .create();
+
     expect(
-      () => Application.configure(basePath: Directory.current.path)
-          .withConfig({'thoth': <String, Object?>{}})
-          .withProviders([ThothServiceProvider.new])
-          .create(),
+      () => app.make<ThothServer>().start(port: 0),
       throwsA(
         isA<StateError>().having(
           (error) => error.message,

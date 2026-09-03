@@ -16,6 +16,11 @@ class ThothServer {
 
   Future<HttpServer> start({String? host, int? port}) async {
     if (_server != null) throw StateError('Thoth is already running');
+    if (config.appId.isEmpty ||
+        config.appKey.isEmpty ||
+        config.appSecret.isEmpty) {
+      throw StateError('Thoth app id, key, and secret are required.');
+    }
     return _server = await shelf_io.serve(
       handler.handler,
       host ?? config.host,

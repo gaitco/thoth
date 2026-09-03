@@ -21,10 +21,6 @@ class ThothServiceProvider extends ServiceProvider {
     final id = (credentials['id'] ?? '') as String;
     final key = (credentials['key'] ?? '') as String;
     final secret = (credentials['secret'] ?? '') as String;
-    if (id.isEmpty || key.isEmpty || secret.isEmpty) {
-      throw StateError('Thoth app id, key, and secret are required.');
-    }
-
     this.app.instance<ThothConfig>(
       ThothConfig(
         appId: id,
