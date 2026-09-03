@@ -28,5 +28,5 @@ server broadcasts, optional client events, ping/pong activity checks, channel
 inspection, connection limits, and graceful shutdown. State is held in one
 process; run one Thoth instance until a shared registry is added.
 
-See the [WebSockets guide](https://github.com/gaitco/maat-monorepo/blob/main/docs/websockets.md)
+See the packaged [WebSockets guide](doc/websockets.md)
 for configuration, `pusher-js`, Supervisor, nginx, TLS, and monitoring examples.

@@ -2,11 +2,12 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
-import 'package:maat/maat.dart' show PusherSigner;
+import 'package:maat/maat.dart' show Log, PusherSigner;
 import 'package:shelf/shelf_io.dart' as shelf_io;
 import 'package:test/test.dart';
 import 'package:thoth/thoth.dart';
 import 'package:web_socket_channel/io.dart';
+import 'package:web_socket_channel/web_socket_channel.dart' show WebSocketSink;
 
 Map<String, Object?> decodeFrame(Object? raw) {
   final frame = Map<String, Object?>.from(jsonDecode(raw! as String) as Map);
@@ -71,14 +72,49 @@ class LifecycleSocket {
 
 class FailingOnceDisconnectRegistry extends InMemoryChannelRegistry {
   var _shouldFail = true;
+  final failed = Completer<void>();
 
   @override
   Future<void> disconnect(SocketConnection connection) async {
     await super.disconnect(connection);
     if (_shouldFail) {
       _shouldFail = false;
+      failed.complete();
       throw StateError('disconnect failed');
     }
+  }
+}
+
+class FailingSubscribeRegistry extends InMemoryChannelRegistry {
+  @override
+  Future<void> subscribe(
+    SocketConnection connection,
+    String channel, {
+    Map<String, Object?>? member,
+  }) => Future.error(StateError('subscribe failed with app-secret'));
+}
+
+class FailingPingConnection extends SocketConnection {
+  FailingPingConnection(super.id, super.sink);
+
+  @override
+  Future<void> send(PusherFrame frame) {
+    if (frame.event == 'pusher:ping') {
+      return Future.error(StateError('ping failed with app-secret'));
+    }
+    return super.send(frame);
+  }
+}
+
+class FailingTimeoutCloseConnection extends SocketConnection {
+  FailingTimeoutCloseConnection(super.id, super.sink);
+
+  @override
+  Future<void> close([int? code, String? reason]) {
+    if (code == 4201) {
+      return Future.error(StateError('timeout close failed with app-secret'));
+    }
+    return super.close(code, reason);
   }
 }
 
@@ -214,6 +250,66 @@ void main() {
     expect((await socket.next())['event'], 'pusher:ping');
   });
 
+  test('heartbeat send failures are reported and close 1011', () async {
+    final previousSink = Log.sink;
+    final logs = StringBuffer();
+    Log.sink = logs;
+    addTearDown(() => Log.sink = previousSink);
+    final server = await shelf_io.serve(
+      ThothHandler(
+        const ThothConfig(
+          appId: 'app-id',
+          appKey: 'app-key',
+          appSecret: 'app-secret',
+          activityTimeout: Duration(milliseconds: 10),
+        ),
+        connectionFactory: (id, WebSocketSink sink) =>
+            FailingPingConnection(id, sink),
+      ).handler,
+      InternetAddress.loopbackIPv4,
+      0,
+    );
+    addTearDown(() => server.close(force: true));
+    final socket = await LifecycleSocket.connect(server.port);
+    addTearDown(socket.close);
+
+    expect(await socket.messages.moveNext(), isFalse);
+    expect(socket.channel.closeCode, 1011);
+    expect(logs.toString(), contains('ping failed'));
+    expect(logs.toString(), isNot(contains('app-secret')));
+  });
+
+  test('pong-timeout close failures are reported and close 1011', () async {
+    final previousSink = Log.sink;
+    final logs = StringBuffer();
+    Log.sink = logs;
+    addTearDown(() => Log.sink = previousSink);
+    final server = await shelf_io.serve(
+      ThothHandler(
+        const ThothConfig(
+          appId: 'app-id',
+          appKey: 'app-key',
+          appSecret: 'app-secret',
+          activityTimeout: Duration(milliseconds: 10),
+          pongTimeout: Duration(milliseconds: 10),
+        ),
+        connectionFactory: (id, WebSocketSink sink) =>
+            FailingTimeoutCloseConnection(id, sink),
+      ).handler,
+      InternetAddress.loopbackIPv4,
+      0,
+    );
+    addTearDown(() => server.close(force: true));
+    final socket = await LifecycleSocket.connect(server.port);
+    addTearDown(socket.close);
+
+    expect((await socket.next())['event'], 'pusher:ping');
+    expect(await socket.messages.moveNext(), isFalse);
+    expect(socket.channel.closeCode, 1011);
+    expect(logs.toString(), contains('timeout close failed'));
+    expect(logs.toString(), isNot(contains('app-secret')));
+  });
+
   test('connection capacity rejects before admission', () async {
     final server = await start(
       const ThothConfig(
@@ -237,8 +333,43 @@ void main() {
     expect(second.closeCode, 4100);
   });
 
+  test(
+    'internal message handling failures are reported and close 1011',
+    () async {
+      final previousSink = Log.sink;
+      final logs = StringBuffer();
+      Log.sink = logs;
+      addTearDown(() => Log.sink = previousSink);
+      final server = await shelf_io.serve(
+        ThothHandler(baseConfig, registry: FailingSubscribeRegistry()).handler,
+        InternetAddress.loopbackIPv4,
+        0,
+      );
+      addTearDown(() => server.close(force: true));
+      final socket = await LifecycleSocket.connect(server.port);
+      addTearDown(socket.close);
+
+      socket.channel.sink.add(
+        jsonEncode({
+          'event': 'pusher:subscribe',
+          'data': {'channel': 'tasks'},
+        }),
+      );
+
+      expect(await socket.messages.moveNext(), isFalse);
+      expect(socket.channel.closeCode, 1011);
+      expect(logs.toString(), contains('subscribe failed'));
+      expect(logs.toString(), isNot(contains('app-secret')));
+    },
+  );
+
   test('disconnect cleanup failure releases connection capacity', () async {
-    final cleanupError = Completer<Object>();
+    final previousSink = Log.sink;
+    final logs = StringBuffer();
+    Log.sink = logs;
+    addTearDown(() => Log.sink = previousSink);
+    final uncaughtErrors = <Object>[];
+    final registry = FailingOnceDisconnectRegistry();
     final serverReady = Completer<HttpServer>();
     runZonedGuarded(
       () async => serverReady.complete(
@@ -250,20 +381,24 @@ void main() {
               appSecret: 'app-secret',
               maxConnections: 1,
             ),
-            registry: FailingOnceDisconnectRegistry(),
+            registry: registry,
           ).handler,
           InternetAddress.loopbackIPv4,
           0,
         ),
       ),
-      (error, _) => cleanupError.complete(error),
+      (error, _) => uncaughtErrors.add(error),
     );
     final server = await serverReady.future;
     addTearDown(() => server.close(force: true));
     final first = await LifecycleSocket.connect(server.port);
 
     await first.close();
-    await cleanupError.future;
+    await registry.failed.future;
+    await Future<void>.delayed(Duration.zero);
+
+    expect(uncaughtErrors, isEmpty);
+    expect(logs.toString(), contains('disconnect failed'));
 
     final second = await LifecycleSocket.connect(server.port);
     await second.close();

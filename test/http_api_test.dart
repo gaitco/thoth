@@ -71,6 +71,7 @@ Future<(int, String)> request(
   String path, {
   String body = '',
   bool validSignature = true,
+  int? timestamp,
 }) async {
   final signer = PusherSigner('app-secret');
   final signed = signer.signHttp(
@@ -78,7 +79,7 @@ Future<(int, String)> request(
     path: path,
     body: body,
     key: 'app-key',
-    timestamp: DateTime.now().millisecondsSinceEpoch ~/ 1000,
+    timestamp: timestamp ?? DateTime.now().millisecondsSinceEpoch ~/ 1000,
   );
   if (!validSignature) signed['auth_signature'] = 'invalid';
   final uri = Uri(
@@ -158,11 +159,18 @@ void main() {
         200,
       );
       expect((await second.next())['data'], {'id': 2});
-      final firstResult = await Future.any([
-        first.next().then((_) => 'received'),
-        Future.delayed(const Duration(milliseconds: 30), () => 'none'),
-      ]);
-      expect(firstResult, 'none');
+
+      final sentinelBody = jsonEncode({
+        'name': 'TaskChanged',
+        'channels': ['tasks'],
+        'data': jsonEncode({'id': 3}),
+      });
+      expect(
+        (await request(server.port, 'POST', path, body: sentinelBody)).$1,
+        200,
+      );
+      expect((await first.next())['data'], {'id': 3});
+      expect((await second.next())['data'], {'id': 3});
     },
   );
 
@@ -183,6 +191,30 @@ void main() {
         401,
       );
       expect((await request(server.port, 'POST', path, body: body)).$1, 422);
+    },
+  );
+
+  test(
+    'signed API rejects stale requests without exposing the secret',
+    () async {
+      const path = '/apps/app-id/channels';
+      final stale = await request(
+        server.port,
+        'GET',
+        path,
+        timestamp: DateTime.now().millisecondsSinceEpoch ~/ 1000 - 601,
+      );
+      final invalid = await request(
+        server.port,
+        'GET',
+        path,
+        validSignature: false,
+      );
+
+      expect(stale.$1, 401);
+      expect(stale.$2, isNot(contains('app-secret')));
+      expect(invalid.$1, 401);
+      expect(invalid.$2, isNot(contains('app-secret')));
     },
   );
 
@@ -218,5 +250,42 @@ void main() {
       (await request(server.port, 'GET', '/apps/app-id/channels/missing')).$1,
       404,
     );
+  });
+
+  test('signed API lists presence users', () async {
+    final socket = await ApiSocket.connect(server.port);
+    addTearDown(socket.close);
+    const channel = 'presence-room';
+    const channelData = '{"user_id":"7","user_info":{"name":"Ada"}}';
+    final signature = PusherSigner(
+      'app-secret',
+    ).subscriptionSignature(socket.id, channel, channelData: channelData);
+    socket.channel.sink.add(
+      jsonEncode({
+        'event': 'pusher:subscribe',
+        'data': {
+          'channel': channel,
+          'auth': 'app-key:$signature',
+          'channel_data': channelData,
+        },
+      }),
+    );
+    expect(
+      (await socket.next())['event'],
+      'pusher_internal:subscription_succeeded',
+    );
+
+    final users = await request(
+      server.port,
+      'GET',
+      '/apps/app-id/channels/$channel/users',
+    );
+
+    expect(users.$1, 200);
+    expect(jsonDecode(users.$2), {
+      'users': [
+        {'id': '7'},
+      ],
+    });
   });
 }

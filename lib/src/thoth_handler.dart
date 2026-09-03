@@ -1,10 +1,10 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 import 'dart:math';
 
-import 'package:maat/maat.dart' show PusherSigner;
+import 'package:maat/maat.dart' show Log, PusherSigner;
 import 'package:shelf/shelf.dart';
-import 'package:shelf_web_socket/shelf_web_socket.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
 
 import 'channel_registry.dart';
@@ -13,15 +13,25 @@ import 'frame.dart';
 import 'socket_connection.dart';
 
 class ThothHandler {
-  ThothHandler(this.config, {ChannelRegistry? registry})
-    : registry = registry ?? InMemoryChannelRegistry(),
-      _signer = PusherSigner(config.appSecret);
+  ThothHandler(
+    this.config, {
+    ChannelRegistry? registry,
+    SocketConnection Function(String id, WebSocketSink sink)? connectionFactory,
+  }) : registry = registry ?? InMemoryChannelRegistry(),
+       _connectionFactory =
+           connectionFactory ?? ((id, sink) => SocketConnection(id, sink)),
+       _signer = PusherSigner(config.appSecret);
 
   final ThothConfig config;
   final ChannelRegistry registry;
+  final SocketConnection Function(String id, WebSocketSink sink)
+  _connectionFactory;
   final PusherSigner _signer;
   final Random _random = Random.secure();
+  final Set<SocketConnection> _connections = {};
+  final Set<Future<void>> _serveTasks = {};
   int _connectionCount = 0;
+  bool _shuttingDown = false;
 
   Handler get handler => call;
 
@@ -40,14 +50,100 @@ class ThothHandler {
     }
 
     final rejection = _rejection(request, segments.last);
-    return webSocketHandler((socket, _) {
+    return _upgrade(request, (socket) {
       if (rejection != null) {
-        unawaited(socket.sink.close(rejection.$1, rejection.$2));
+        _runDetached(
+          'Failed to reject WebSocket',
+          () => socket.close(rejection.$1, rejection.$2),
+        );
+        return;
+      }
+      if (_shuttingDown) {
+        _runDetached(
+          'Failed to close WebSocket during shutdown',
+          () => socket.close(WebSocketStatus.goingAway, 'Server shutting down'),
+        );
         return;
       }
       _connectionCount++;
-      unawaited(_serve(socket));
-    })(request);
+      final task = _serve(socket);
+      _serveTasks.add(task);
+      unawaited(_observe(task));
+    });
+  }
+
+  Response _upgrade(Request request, void Function(WebSocket) onConnection) {
+    if (request.method != 'GET') return Response.notFound('Not found');
+    final connection = request.headers['Connection'];
+    final upgrade = request.headers['Upgrade'];
+    final version = request.headers['Sec-WebSocket-Version'];
+    final key = request.headers['Sec-WebSocket-Key'];
+    if (connection == null ||
+        !connection
+            .toLowerCase()
+            .split(',')
+            .map((token) => token.trim())
+            .contains('upgrade') ||
+        upgrade?.toLowerCase() != 'websocket') {
+      return Response.notFound('Not found');
+    }
+    if (version == null || key == null || request.protocolVersion != '1.1') {
+      return Response(400, body: 'Invalid WebSocket upgrade');
+    }
+    if (version != '13') return Response.notFound('Not found');
+    if (!request.canHijack) {
+      throw ArgumentError('WebSocket upgrades require request hijacking.');
+    }
+
+    request.hijack((channel) {
+      try {
+        final transport = channel.sink;
+        if (transport is! Socket) {
+          throw ArgumentError('WebSocket transport must be a Socket.');
+        }
+        utf8.encoder
+            .startChunkedConversion(transport)
+            .add(
+              'HTTP/1.1 101 Switching Protocols\r\n'
+              'Upgrade: websocket\r\n'
+              'Connection: Upgrade\r\n'
+              'Sec-WebSocket-Accept: ${WebSocketChannel.signKey(key)}\r\n'
+              '\r\n',
+            );
+        onConnection(WebSocket.fromUpgradedSocket(transport, serverSide: true));
+      } catch (error, stackTrace) {
+        _report('Failed to upgrade WebSocket', error, stackTrace);
+        final transport = channel.sink;
+        if (transport is Socket) {
+          transport.destroy();
+        } else {
+          _runDetached('Failed to close WebSocket transport', transport.close);
+        }
+      }
+    });
+  }
+
+  Future<void> shutdown() async {
+    _shuttingDown = true;
+    final connections = _connections.toList();
+    for (final connection in connections) {
+      try {
+        connection.cancelTimers();
+      } catch (error, stackTrace) {
+        _report('Failed to cancel connection timers', error, stackTrace);
+      }
+    }
+    await Future.wait([
+      for (final connection in connections)
+        _guard(
+          'Failed to close WebSocket during shutdown',
+          () => connection.close(
+            WebSocketStatus.goingAway,
+            'Server shutting down',
+          ),
+        ),
+    ]);
+    await Future.wait(_serveTasks.toList());
   }
 
   Future<Response> _handleHttp(Request request, List<String> segments) async {
@@ -152,9 +248,11 @@ class ThothHandler {
     return null;
   }
 
-  Future<void> _serve(WebSocketChannel socket) async {
-    final connection = SocketConnection(_socketId(), socket.sink);
+  Future<void> _serve(WebSocket socket) async {
+    SocketConnection? connection;
     try {
+      connection = _connectionFactory(_socketId(), _IoWebSocketSink(socket));
+      _connections.add(connection);
       await connection.send(
         PusherFrame('pusher:connection_established', {
           'socket_id': connection.id,
@@ -162,15 +260,30 @@ class ThothHandler {
         }),
       );
       _resetActivity(connection);
-      await for (final message in socket.stream) {
+      await for (final message in socket) {
         _resetActivity(connection);
         await _handleMessage(connection, message);
       }
+    } catch (error, stackTrace) {
+      final active = connection;
+      if (active == null) {
+        _report('Failed to create WebSocket connection', error, stackTrace);
+      } else {
+        await _failConnection(active, error, stackTrace);
+      }
     } finally {
+      final active = connection;
       try {
-        connection.cancelTimers();
-        await registry.disconnect(connection);
+        if (active != null) active.cancelTimers();
+      } catch (error, stackTrace) {
+        _report('Failed to cancel connection timers', error, stackTrace);
+      }
+      try {
+        if (active != null) await registry.disconnect(active);
+      } catch (error, stackTrace) {
+        _report('Failed to disconnect WebSocket', error, stackTrace);
       } finally {
+        if (active != null) _connections.remove(active);
         _connectionCount--;
       }
     }
@@ -180,112 +293,224 @@ class ThothHandler {
     SocketConnection connection,
     Object? message,
   ) async {
+    late final Map<String, Object?> frame;
     try {
-      final frame = Map<String, Object?>.from(
-        jsonDecode(message! as String) as Map,
+      frame = Map<String, Object?>.from(jsonDecode(message! as String) as Map);
+    } on FormatException {
+      await _error(connection, 'Malformed event');
+      return;
+    } on TypeError {
+      await _error(connection, 'Malformed event');
+      return;
+    }
+
+    final event = frame['event'];
+    if (event == 'pusher:pong') return;
+    if (event == 'pusher:ping') {
+      await connection.send(
+        const PusherFrame('pusher:pong', <String, Object?>{}),
       );
-      final event = frame['event'];
-      if (event == 'pusher:pong') return;
-      if (event == 'pusher:ping') {
-        await connection.send(
-          const PusherFrame('pusher:pong', <String, Object?>{}),
-        );
+      return;
+    }
+    if (event == 'pusher:subscribe') {
+      late final Map<String, Object?> data;
+      try {
+        data = _dataMap(frame['data']);
+      } on FormatException {
+        await _error(connection, 'Malformed event');
+        return;
+      } on TypeError {
+        await _error(connection, 'Malformed event');
         return;
       }
-      if (event == 'pusher:subscribe') {
-        final data = _dataMap(frame['data']);
-        final channel = data['channel'];
-        if (channel is! String || channel.isEmpty) {
-          await _error(connection, 'A channel is required');
+      final channel = data['channel'];
+      if (channel is! String || channel.isEmpty) {
+        await _error(connection, 'A channel is required');
+        return;
+      }
+      final private = channel.startsWith('private-');
+      final presence = channel.startsWith('presence-');
+      Map<String, Object?>? member;
+      if (private || presence) {
+        final channelData = data['channel_data'];
+        if (!_validSubscription(
+          connection.id,
+          channel,
+          data['auth'],
+          channelData: presence ? channelData : null,
+        )) {
+          await _error(connection, 'Invalid subscription signature');
           return;
         }
-        final private = channel.startsWith('private-');
-        final presence = channel.startsWith('presence-');
-        Map<String, Object?>? member;
-        if (private || presence) {
-          final channelData = data['channel_data'];
-          if (!_validSubscription(
-            connection.id,
-            channel,
-            data['auth'],
-            channelData: presence ? channelData : null,
-          )) {
-            await _error(connection, 'Invalid subscription signature');
+        if (presence) {
+          try {
+            member = _dataMap(channelData);
+          } on FormatException {
+            await _error(connection, 'Malformed event');
+            return;
+          } on TypeError {
+            await _error(connection, 'Malformed event');
             return;
           }
-          if (presence) {
-            member = _dataMap(channelData);
-            final userId = member['user_id'];
-            if (userId is! String || userId.isEmpty) {
-              await _error(connection, 'Presence user_id is required');
-              return;
-            }
+          final userId = member['user_id'];
+          if (userId is! String || userId.isEmpty) {
+            await _error(connection, 'Presence user_id is required');
+            return;
           }
         }
-        await registry.subscribe(connection, channel, member: member);
-        final info = registry.info(channel);
-        await connection.send(
-          PusherFrame(
-            'pusher_internal:subscription_succeeded',
-            presence
-                ? {
-                    'presence': {
-                      'ids': info!.members.keys.toList(),
-                      'hash': info.members,
-                      'count': info.members.length,
-                    },
-                  }
-                : const <String, Object?>{},
-            channel: channel,
-          ),
-        );
-        return;
       }
-      if (event == 'pusher:unsubscribe') {
-        final channel = _dataMap(frame['data'])['channel'];
-        if (channel is String) await registry.unsubscribe(connection, channel);
-        return;
-      }
-      if (event is String && event.startsWith('client-')) {
-        final channel = frame['channel'];
-        if (!config.clientEvents ||
-            channel is! String ||
-            (!channel.startsWith('private-') &&
-                !channel.startsWith('presence-')) ||
-            !connection.channels.contains(channel)) {
-          await _error(connection, 'Client event is not allowed');
-          return;
-        }
-        await registry.publish(
-          channel,
-          event,
-          frame['data'],
-          exceptSocketId: connection.id,
-        );
-        return;
-      }
-      await _error(connection, 'Unknown event');
-    } on Object {
-      await _error(connection, 'Malformed event');
+      await registry.subscribe(connection, channel, member: member);
+      final info = registry.info(channel);
+      await connection.send(
+        PusherFrame(
+          'pusher_internal:subscription_succeeded',
+          presence
+              ? {
+                  'presence': {
+                    'ids': info!.members.keys.toList(),
+                    'hash': info.members,
+                    'count': info.members.length,
+                  },
+                }
+              : const <String, Object?>{},
+          channel: channel,
+        ),
+      );
+      return;
     }
+    if (event == 'pusher:unsubscribe') {
+      late final Object? channel;
+      try {
+        channel = _dataMap(frame['data'])['channel'];
+      } on FormatException {
+        await _error(connection, 'Malformed event');
+        return;
+      } on TypeError {
+        await _error(connection, 'Malformed event');
+        return;
+      }
+      if (channel is String) await registry.unsubscribe(connection, channel);
+      return;
+    }
+    if (event is String && event.startsWith('client-')) {
+      final channel = frame['channel'];
+      if (!config.clientEvents ||
+          channel is! String ||
+          (!channel.startsWith('private-') &&
+              !channel.startsWith('presence-')) ||
+          !connection.channels.contains(channel)) {
+        await _error(connection, 'Client event is not allowed');
+        return;
+      }
+      await registry.publish(
+        channel,
+        event,
+        frame['data'],
+        exceptSocketId: connection.id,
+      );
+      return;
+    }
+    await _error(connection, 'Unknown event');
   }
 
-  Future<void> _error(SocketConnection connection, String message) => connection
-      .send(PusherFrame('pusher:error', {'code': 4000, 'message': message}));
+  Future<void> _error(SocketConnection connection, String message) =>
+      connection.send(PusherFrame('pusher:error', {'message': message}));
 
   void _resetActivity(SocketConnection connection) {
     connection.activityTimer?.cancel();
     connection.pongTimer?.cancel();
     connection.activityTimer = Timer(config.activityTimeout, () {
-      unawaited(
-        connection.send(const PusherFrame('pusher:ping', <String, Object?>{})),
-      );
-      connection.pongTimer = Timer(
-        config.pongTimeout,
-        () => unawaited(connection.close(4201, 'Pong timeout')),
-      );
+      _runConnectionTask(connection, 'Failed to send heartbeat', () async {
+        await connection.send(
+          const PusherFrame('pusher:ping', <String, Object?>{}),
+        );
+        connection.pongTimer = Timer(config.pongTimeout, () {
+          _runConnectionTask(
+            connection,
+            'Failed to close connection after pong timeout',
+            () => connection.close(4201, 'Pong timeout'),
+          );
+        });
+      });
     });
   }
+
+  void _runConnectionTask(
+    SocketConnection connection,
+    String context,
+    Future<void> Function() action,
+  ) {
+    unawaited(() async {
+      try {
+        await action();
+      } catch (error, stackTrace) {
+        await _failConnection(connection, error, stackTrace, context: context);
+      }
+    }());
+  }
+
+  Future<void> _failConnection(
+    SocketConnection connection,
+    Object error,
+    StackTrace stackTrace, {
+    String context = 'WebSocket connection failed',
+  }) async {
+    _report(context, error, stackTrace);
+    try {
+      connection.cancelTimers();
+    } catch (timerError, timerStackTrace) {
+      _report(
+        'Failed to cancel connection timers',
+        timerError,
+        timerStackTrace,
+      );
+    }
+    await _guard(
+      'Failed to close faulty WebSocket',
+      () => connection.close(
+        WebSocketStatus.internalServerError,
+        'Internal server error',
+      ),
+    );
+  }
+
+  void _runDetached(String context, Future<void> Function() action) {
+    unawaited(_guard(context, action));
+  }
+
+  Future<void> _guard(String context, Future<void> Function() action) async {
+    try {
+      await action();
+    } catch (error, stackTrace) {
+      _report(context, error, stackTrace);
+    }
+  }
+
+  Future<void> _observe(Future<void> task) async {
+    try {
+      await task;
+    } catch (error, stackTrace) {
+      _report('Unhandled WebSocket serve task failure', error, stackTrace);
+    } finally {
+      _serveTasks.remove(task);
+    }
+  }
+
+  void _report(String context, Object error, StackTrace stackTrace) {
+    try {
+      Log.error(
+        _redact('$context: $error'),
+        null,
+        StackTrace.fromString(_redact(stackTrace.toString())),
+      );
+    } catch (_) {
+      // Error reporting must not create another detached failure.
+    }
+  }
+
+  String _redact(String value) => config.appSecret.isEmpty
+      ? value
+      : value.replaceAll(config.appSecret, '[REDACTED]');
 
   bool _validSubscription(
     String socketId,
@@ -315,4 +540,32 @@ class ThothHandler {
   String _socketId() =>
       '${_random.nextInt(0x7ffffffe) + 1}.'
       '${_random.nextInt(0x7ffffffe) + 1}';
+}
+
+class _IoWebSocketSink implements WebSocketSink {
+  const _IoWebSocketSink(this.socket);
+
+  final WebSocket socket;
+
+  @override
+  void add(Object? data) => socket.add(data);
+
+  @override
+  void addError(Object error, [StackTrace? stackTrace]) =>
+      socket.addError(error, stackTrace);
+
+  @override
+  Future<void> addStream(Stream<Object?> stream) async {
+    await socket.addStream(stream);
+  }
+
+  @override
+  Future<void> close([int? closeCode, String? closeReason]) async {
+    await socket.close(closeCode, closeReason);
+  }
+
+  @override
+  Future<void> get done async {
+    await socket.done;
+  }
 }

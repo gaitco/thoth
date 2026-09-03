@@ -1,8 +1,10 @@
+import 'dart:async';
 import 'dart:io';
 
 import 'package:maat/maat.dart';
 import 'package:test/test.dart';
 import 'package:thoth/thoth.dart';
+import 'package:web_socket_channel/io.dart';
 
 const _config = ThothConfig(
   appId: 'app-id',
@@ -29,6 +31,19 @@ class _RecordingServer extends ThothServer {
   Future<void> close({bool force = false}) async {
     closed = true;
     await bound?.close(force: force);
+  }
+}
+
+class _ObservableServer extends ThothServer {
+  _ObservableServer() : super(_config);
+
+  final started = Completer<HttpServer>();
+
+  @override
+  Future<HttpServer> start({String? host, int? port}) async {
+    final server = await super.start(host: host, port: port);
+    started.complete(server);
+    return server;
   }
 }
 
@@ -148,6 +163,46 @@ void main() {
     expect(server.port, overridePort);
     expect(server.closed, isTrue);
   });
+
+  test(
+    'thoth:start closes an active WebSocket and releases its port',
+    () async {
+      final app = await _app();
+      final server = _ObservableServer();
+      final shutdown = Completer<void>();
+      final running = Sesh(
+        app,
+        commands: [
+          ThothStartCommand(
+            server: (_) => server,
+            waitForShutdown: () => shutdown.future,
+          ),
+        ],
+      ).run(['thoth:start', '--host=127.0.0.1', '--port=0']);
+      final bound = await server.started.future;
+      final port = bound.port;
+      final socket = IOWebSocketChannel.connect(
+        'ws://127.0.0.1:$port/app/app-key'
+        '?protocol=7&client=thoth-test&version=1.0',
+      );
+      await socket.ready;
+      final messages = StreamIterator<Object?>(socket.stream);
+      expect(await messages.moveNext(), isTrue);
+      addTearDown(() async {
+        if (!shutdown.isCompleted) shutdown.complete();
+        await socket.sink.close();
+        await running;
+      });
+
+      shutdown.complete();
+
+      expect(await running.timeout(const Duration(seconds: 1)), 0);
+      expect(await messages.moveNext(), isFalse);
+      expect(socket.closeCode, 1001);
+      final rebound = await HttpServer.bind('127.0.0.1', port);
+      await rebound.close(force: true);
+    },
+  );
 
   test('thoth:ping uses configured host and port without options', () async {
     final health = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);

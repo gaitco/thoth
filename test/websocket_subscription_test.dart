@@ -68,6 +68,10 @@ void main() {
     final established = await socket.next();
     expect(established['event'], 'pusher:connection_established');
     expect((established['data']! as Map)['activity_timeout'], 120);
+    expect(
+      (established['data']! as Map)['socket_id'],
+      matches(RegExp(r'^[1-9][0-9]*\.[1-9][0-9]*$')),
+    );
 
     socket.channel.sink.add(
       jsonEncode({
@@ -78,6 +82,45 @@ void main() {
     final subscribed = await socket.next();
     expect(subscribed['event'], 'pusher_internal:subscription_succeeded');
     expect(subscribed['channel'], 'tasks');
+  });
+
+  test('unsubscribe is idempotent', () async {
+    final socket = await TestSocket.connect(server.port);
+    addTearDown(socket.close);
+    await socket.next();
+    final subscribe = jsonEncode({
+      'event': 'pusher:subscribe',
+      'data': {'channel': 'tasks'},
+    });
+    final unsubscribe = jsonEncode({
+      'event': 'pusher:unsubscribe',
+      'data': {'channel': 'tasks'},
+    });
+    socket.channel.sink.add(subscribe);
+    expect(
+      (await socket.next())['event'],
+      'pusher_internal:subscription_succeeded',
+    );
+
+    socket.channel.sink
+      ..add(unsubscribe)
+      ..add(unsubscribe)
+      ..add(subscribe);
+
+    expect(
+      (await socket.next())['event'],
+      'pusher_internal:subscription_succeeded',
+    );
+  });
+
+  test('WebSocket route matches only /app/{key}', () async {
+    final client = HttpClient();
+    addTearDown(() => client.close(force: true));
+    final response = await (await client.getUrl(
+      Uri.parse('http://127.0.0.1:${server.port}/app/app-key/extra'),
+    )).close();
+
+    expect(response.statusCode, 404);
   });
 
   test('accepts a correctly signed private subscription', () async {
@@ -113,7 +156,10 @@ void main() {
         'data': {'channel': 'private-orders.1', 'auth': 'app-key:invalid'},
       }),
     );
-    expect((await socket.next())['event'], 'pusher:error');
+    expect(await socket.next(), {
+      'event': 'pusher:error',
+      'data': {'message': 'Invalid subscription signature'},
+    });
 
     socket.channel.sink.add(
       jsonEncode({
@@ -133,7 +179,10 @@ void main() {
     await socket.next();
 
     socket.channel.sink.add('{');
-    expect((await socket.next())['event'], 'pusher:error');
+    expect(await socket.next(), {
+      'event': 'pusher:error',
+      'data': {'message': 'Malformed event'},
+    });
     socket.channel.sink.add(jsonEncode({'event': 'unknown', 'data': {}}));
     expect((await socket.next())['event'], 'pusher:error');
     socket.channel.sink.add(
