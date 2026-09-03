@@ -1,0 +1,16 @@
+name: thoth
+description: A self-hosted Pusher Protocol WebSocket server for Maat applications.
+version: 0.1.0
+repository: https://github.com/gaitco/thoth
+environment:
+  sdk: ^3.12.0
+resolution: workspace
+dependencies:
+  crypto: ^3.0.6
+  maat: ^0.1.0
+  shelf: ^1.4.2
+  shelf_web_socket: ^3.0.0
+  web_socket_channel: ^3.0.3
+dev_dependencies:
+  lints: ^6.1.0
+  test: ^1.31.2
