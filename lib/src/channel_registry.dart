@@ -100,8 +100,18 @@ class InMemoryChannelRegistry implements ChannelRegistry {
 
   @override
   Future<void> disconnect(SocketConnection connection) async {
+    Object? firstError;
+    StackTrace? firstStackTrace;
     for (final channel in connection.channels.toList()) {
-      await unsubscribe(connection, channel);
+      try {
+        await unsubscribe(connection, channel);
+      } catch (error, stackTrace) {
+        firstError ??= error;
+        firstStackTrace ??= stackTrace;
+      }
+    }
+    if (firstError != null) {
+      Error.throwWithStackTrace(firstError, firstStackTrace!);
     }
   }
 

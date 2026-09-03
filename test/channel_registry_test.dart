@@ -28,6 +28,16 @@ class RecordingSink implements WebSocketSink {
   Future<void> get done => _done.future;
 }
 
+class ThrowingMemberRemovedSink extends RecordingSink {
+  @override
+  void add(Object? data) {
+    if (data is String && data.contains('pusher_internal:member_removed')) {
+      throw StateError('member removal failed');
+    }
+    super.add(data);
+  }
+}
+
 SocketConnection connection(String id, RecordingSink sink) =>
     SocketConnection(id, sink);
 
@@ -90,4 +100,45 @@ void main() {
     await registry.disconnect(second);
     expect(registry.info('presence-room'), isNull);
   });
+
+  test(
+    'disconnect removes every membership when a presence departure fails',
+    () async {
+      final registry = InMemoryChannelRegistry();
+      final leaving = connection('1.1', RecordingSink());
+      final remaining = connection('2.2', ThrowingMemberRemovedSink());
+      const leavingMember = {
+        'user_id': '1',
+        'user_info': {'name': 'Ada'},
+      };
+      const remainingMember = {
+        'user_id': '2',
+        'user_info': {'name': 'Grace'},
+      };
+      await registry.subscribe(
+        leaving,
+        'presence-first',
+        member: leavingMember,
+      );
+      await registry.subscribe(
+        remaining,
+        'presence-first',
+        member: remainingMember,
+      );
+      await registry.subscribe(
+        leaving,
+        'presence-second',
+        member: leavingMember,
+      );
+
+      await expectLater(
+        registry.disconnect(leaving),
+        throwsA(isA<StateError>()),
+      );
+
+      expect(registry.info('presence-first')?.members.keys, ['2']);
+      expect(registry.info('presence-second'), isNull);
+      expect(leaving.channels, isEmpty);
+    },
+  );
 }
