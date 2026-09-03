@@ -1,0 +1,8 @@
+{
+  "name": "thoth-pusher-js-compat",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "pusher-js": "8.6.0"
+  }
+}
