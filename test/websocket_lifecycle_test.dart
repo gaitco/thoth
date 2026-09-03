@@ -69,6 +69,19 @@ class LifecycleSocket {
   }
 }
 
+class FailingOnceDisconnectRegistry extends InMemoryChannelRegistry {
+  var _shouldFail = true;
+
+  @override
+  Future<void> disconnect(SocketConnection connection) async {
+    await super.disconnect(connection);
+    if (_shouldFail) {
+      _shouldFail = false;
+      throw StateError('disconnect failed');
+    }
+  }
+}
+
 Future<HttpServer> start(ThothConfig config) => shelf_io.serve(
   ThothHandler(config).handler,
   InternetAddress.loopbackIPv4,
@@ -222,5 +235,37 @@ void main() {
     await second.stream.drain<void>();
 
     expect(second.closeCode, 4100);
+  });
+
+  test('disconnect cleanup failure releases connection capacity', () async {
+    final cleanupError = Completer<Object>();
+    final serverReady = Completer<HttpServer>();
+    runZonedGuarded(
+      () async => serverReady.complete(
+        await shelf_io.serve(
+          ThothHandler(
+            const ThothConfig(
+              appId: 'app-id',
+              appKey: 'app-key',
+              appSecret: 'app-secret',
+              maxConnections: 1,
+            ),
+            registry: FailingOnceDisconnectRegistry(),
+          ).handler,
+          InternetAddress.loopbackIPv4,
+          0,
+        ),
+      ),
+      (error, _) => cleanupError.complete(error),
+    );
+    final server = await serverReady.future;
+    addTearDown(() => server.close(force: true));
+    final first = await LifecycleSocket.connect(server.port);
+
+    await first.close();
+    await cleanupError.future;
+
+    final second = await LifecycleSocket.connect(server.port);
+    await second.close();
   });
 }

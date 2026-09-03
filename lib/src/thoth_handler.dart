@@ -166,9 +166,12 @@ class ThothHandler {
         await _handleMessage(connection, message);
       }
     } finally {
-      connection.cancelTimers();
-      await registry.disconnect(connection);
-      _connectionCount--;
+      try {
+        connection.cancelTimers();
+        await registry.disconnect(connection);
+      } finally {
+        _connectionCount--;
+      }
     }
   }
 
