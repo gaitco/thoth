@@ -27,6 +27,14 @@ class ThothHandler {
 
   FutureOr<Response> call(Request request) {
     final segments = request.url.pathSegments;
+    if (request.method == 'GET' &&
+        segments.length == 1 &&
+        segments.first == 'health') {
+      return _json(200, {'status': 'ok'});
+    }
+    if (segments.isNotEmpty && segments.first == 'apps') {
+      return _handleHttp(request, segments);
+    }
     if (segments.length != 2 || segments.first != 'app') {
       return Response.notFound('Not found');
     }
@@ -41,6 +49,95 @@ class ThothHandler {
       unawaited(_serve(socket));
     })(request);
   }
+
+  Future<Response> _handleHttp(Request request, List<String> segments) async {
+    final body = await request.readAsString();
+    final path = '/${request.url.path}';
+    if (segments.length < 3 ||
+        segments[1] != config.appId ||
+        !_signer.verifyHttpRequest(
+          method: request.method,
+          path: path,
+          body: body,
+          key: config.appKey,
+          query: request.url.queryParameters,
+        )) {
+      return _json(401, {'error': 'Unauthorized'});
+    }
+
+    if (request.method == 'POST' &&
+        segments.length == 3 &&
+        segments[2] == 'events') {
+      return _publish(body);
+    }
+    if (request.method == 'GET' && segments[2] == 'channels') {
+      if (segments.length == 3) return _channels();
+      final info = registry.info(segments[3]);
+      if (info == null) return _json(404, {'error': 'Channel not found'});
+      if (segments.length == 4) return _channel(info);
+      if (segments.length == 5 && segments[4] == 'users') {
+        return _json(200, {
+          'users': [
+            for (final id in info.members.keys) {'id': id},
+          ],
+        });
+      }
+    }
+    return _json(404, {'error': 'Not found'});
+  }
+
+  Future<Response> _publish(String body) async {
+    try {
+      final payload = Map<String, Object?>.from(jsonDecode(body) as Map);
+      final name = payload['name'];
+      final channels = payload['channels'];
+      final encodedData = payload['data'];
+      final socketId = payload['socket_id'];
+      if (name is! String ||
+          name.isEmpty ||
+          channels is! List ||
+          channels.isEmpty ||
+          channels.any((channel) => channel is! String || channel.isEmpty) ||
+          encodedData is! String ||
+          (socketId != null && socketId is! String)) {
+        return _json(422, {'error': 'Invalid event'});
+      }
+      final data = jsonDecode(encodedData);
+      await Future.wait([
+        for (final channel in channels.cast<String>())
+          registry.publish(
+            channel,
+            name,
+            data,
+            exceptSocketId: socketId as String?,
+          ),
+      ]);
+      return _json(200, const <String, Object?>{});
+    } on Object {
+      return _json(422, {'error': 'Invalid event'});
+    }
+  }
+
+  Response _channels() => _json(200, {
+    'channels': {
+      for (final info in registry.occupiedChannels)
+        info.name: info.members.isEmpty
+            ? <String, Object?>{}
+            : <String, Object?>{'user_count': info.members.length},
+    },
+  });
+
+  Response _channel(ChannelInfo info) => _json(200, {
+    'occupied': info.occupied,
+    'subscription_count': info.subscriptionCount,
+    if (info.members.isNotEmpty) 'user_count': info.members.length,
+  });
+
+  static Response _json(int status, Object body) => Response(
+    status,
+    body: jsonEncode(body),
+    headers: {'content-type': 'application/json'},
+  );
 
   (int, String)? _rejection(Request request, String key) {
     if (key != config.appKey) return (4001, 'Unknown application key');
