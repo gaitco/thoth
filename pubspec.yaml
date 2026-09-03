@@ -7,7 +7,7 @@ environment:
 resolution: workspace
 dependencies:
   crypto: ^3.0.6
-  maat: ^0.1.0
+  maat: ^0.1.1
   shelf: ^1.4.2
   web_socket_channel: ^3.0.3
 dev_dependencies:
