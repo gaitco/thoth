@@ -2,6 +2,8 @@ import 'dart:io';
 
 import 'package:maat/maat.dart';
 
+import '../config.dart';
+
 class ThothPingCommand extends Command {
   @override
   String get name => 'thoth:ping';
@@ -10,12 +12,17 @@ class ThothPingCommand extends Command {
   String get description => 'Check whether Thoth is healthy';
 
   @override
-  String get signature => '{--host=127.0.0.1} {--port=6001}';
+  String get signature => '{--host=} {--port=}';
 
   @override
   Future<int> handle() async {
-    final host = option('host')!;
-    final port = int.tryParse(option('port')!);
+    final hostOption = option('host');
+    final portOption = option('port');
+    final config = hostOption == null || portOption == null
+        ? this.app.make<ThothConfig>()
+        : null;
+    final host = hostOption ?? config!.host;
+    final port = portOption == null ? config!.port : int.tryParse(portOption);
     if (port == null || port < 1 || port > 65535) {
       error('The port must be between 1 and 65535.');
       return 1;

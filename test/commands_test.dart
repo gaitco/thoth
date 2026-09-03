@@ -11,7 +11,7 @@ const _config = ThothConfig(
 );
 
 class _RecordingServer extends ThothServer {
-  _RecordingServer() : super(_config);
+  _RecordingServer([super.config = _config]);
 
   String? host;
   int? port;
@@ -36,6 +36,29 @@ Future<Application> _app([Map<String, dynamic> config = const {}]) =>
     Application.configure(
       basePath: Directory.current.path,
     ).withConfig(config).create();
+
+Future<Application> _thothApp({required String host, required int port}) =>
+    Application.configure(basePath: Directory.current.path)
+        .withConfig({
+          'thoth': {
+            'host': host,
+            'port': port,
+            'app': {
+              'id': 'configured-id',
+              'key': 'configured-key',
+              'secret': 'configured-secret',
+            },
+          },
+        })
+        .withProviders([ThothServiceProvider.new])
+        .create();
+
+Future<int> _freePort() async {
+  final socket = await ServerSocket.bind(InternetAddress.loopbackIPv4, 0);
+  final port = socket.port;
+  await socket.close();
+  return port;
+}
 
 void main() {
   tearDown(Application.reset);
@@ -92,9 +115,25 @@ void main() {
     );
   });
 
-  test('thoth:start forwards parsed host and port then closes', () async {
-    final app = await _app();
-    final server = _RecordingServer();
+  test('thoth:start uses configured host and port without options', () async {
+    final port = await _freePort();
+    final app = await _thothApp(host: '127.0.0.1', port: port);
+    final output = StringBuffer();
+    final exit = await Sesh(
+      app,
+      out: output,
+      commands: [ThothStartCommand(waitForShutdown: () async {})],
+    ).run(['thoth:start']);
+
+    expect(exit, 0);
+    expect(output.toString(), 'Thoth listening on http://127.0.0.1:$port\n');
+  });
+
+  test('thoth:start options override configured host and port', () async {
+    final configuredPort = await _freePort();
+    final overridePort = await _freePort();
+    final app = await _thothApp(host: '127.0.0.2', port: configuredPort);
+    final server = _RecordingServer(app.make<ThothConfig>());
     final command = ThothStartCommand(
       server: (_) => server,
       waitForShutdown: () async {},
@@ -102,15 +141,15 @@ void main() {
     final exit = await Sesh(
       app,
       commands: [command],
-    ).run(['thoth:start', '--host=127.0.0.2', '--port=6123']);
+    ).run(['thoth:start', '--host=127.0.0.1', '--port=$overridePort']);
 
     expect(exit, 0);
-    expect(server.host, '127.0.0.2');
-    expect(server.port, 6123);
+    expect(server.host, '127.0.0.1');
+    expect(server.port, overridePort);
     expect(server.closed, isTrue);
   });
 
-  test('thoth:ping succeeds only when health returns 200', () async {
+  test('thoth:ping uses configured host and port without options', () async {
     final health = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
     health.listen((request) {
       request.response
@@ -119,7 +158,31 @@ void main() {
         ..close();
     });
     addTearDown(() => health.close(force: true));
-    final app = await _app();
+    final app = await _thothApp(host: '127.0.0.1', port: health.port);
+    final output = StringBuffer();
+    final exit = await Sesh(
+      app,
+      out: output,
+      commands: [ThothPingCommand()],
+    ).run(['thoth:ping']);
+
+    expect(exit, 0);
+    expect(
+      output.toString(),
+      'Thoth is healthy at http://127.0.0.1:${health.port}/health.\n',
+    );
+  });
+
+  test('thoth:ping options override configured host and port', () async {
+    final health = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+    health.listen((request) {
+      request.response
+        ..statusCode = request.uri.path == '/health' ? 200 : 404
+        ..write('{"status":"ok"}')
+        ..close();
+    });
+    addTearDown(() => health.close(force: true));
+    final app = await _thothApp(host: '127.0.0.2', port: await _freePort());
     final output = StringBuffer();
     final exit = await Sesh(
       app,
@@ -128,7 +191,10 @@ void main() {
     ).run(['thoth:ping', '--host=127.0.0.1', '--port=${health.port}']);
 
     expect(exit, 0);
-    expect(output.toString(), contains('healthy'));
+    expect(
+      output.toString(),
+      'Thoth is healthy at http://127.0.0.1:${health.port}/health.\n',
+    );
   });
 
   test('thoth:ping reports a concise error for a closed port', () async {

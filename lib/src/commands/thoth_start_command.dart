@@ -22,12 +22,13 @@ class ThothStartCommand extends Command {
   String get description => 'Start the Thoth WebSocket server';
 
   @override
-  String get signature => '{--host=0.0.0.0} {--port=6001}';
+  String get signature => '{--host=} {--port=}';
 
   @override
   Future<int> handle() async {
-    final port = int.tryParse(option('port')!);
-    if (port == null || port < 0 || port > 65535) {
+    final portOption = option('port');
+    final port = portOption == null ? null : int.tryParse(portOption);
+    if (portOption != null && (port == null || port < 0 || port > 65535)) {
       error('The port must be between 0 and 65535.');
       return 1;
     }
