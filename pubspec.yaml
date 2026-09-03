@@ -4,7 +4,6 @@ version: 0.1.0
 repository: https://github.com/gaitco/thoth
 environment:
   sdk: ^3.12.0
-resolution: workspace
 dependencies:
   crypto: ^3.0.6
   maat: ^0.1.1
