@@ -1,7 +1,7 @@
 import 'dart:async';
 import 'dart:io';
 
-import 'package:thoth/thoth.dart';
+import 'package:thoth_realtime/thoth_realtime.dart';
 
 Future<void> main() async {
   final environment = Platform.environment;

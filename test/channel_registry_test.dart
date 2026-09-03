@@ -2,7 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 
 import 'package:test/test.dart';
-import 'package:thoth/thoth.dart';
+import 'package:thoth_realtime/thoth_realtime.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
 
 class RecordingSink implements WebSocketSink {

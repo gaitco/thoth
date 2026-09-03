@@ -1,6 +1,7 @@
-name: thoth
+name: thoth_realtime
 description: A self-hosted Pusher Protocol WebSocket server for Maat applications.
 version: 0.1.0
+repository: https://github.com/gaitco/thoth
 environment:
   sdk: ^3.12.0
 resolution: workspace

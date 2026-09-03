@@ -4,7 +4,7 @@ import 'dart:io';
 
 import 'package:maat/maat.dart';
 import 'package:test/test.dart';
-import 'package:thoth/thoth.dart';
+import 'package:thoth_realtime/thoth_realtime.dart';
 
 class _User implements Authenticatable {
   const _User();

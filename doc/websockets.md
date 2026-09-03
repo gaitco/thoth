@@ -4,13 +4,14 @@ Thoth is a standalone Pusher Protocol v7 server. Maat applications authorize
 private channels and publish signed events; browser and Node clients connect
 with the official `pusher-js` package.
 
-## Configure the application
+Install the package with `dart pub add thoth_realtime`, then register the
+broadcasting and Thoth providers and expose the two commands:
 
-Register the broadcasting and Thoth providers, then expose the two commands:
+## Configure the application
 
 ```dart
 import 'package:maat/maat.dart';
-import 'package:thoth/thoth.dart';
+import 'package:thoth_realtime/thoth_realtime.dart';
 
 final app = await Application.configure(basePath: Directory.current.path)
     .withConfig({'broadcasting': broadcasting, 'thoth': thoth})

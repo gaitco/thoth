@@ -1,7 +1,7 @@
 import 'dart:convert';
 
 import 'package:test/test.dart';
-import 'package:thoth/thoth.dart';
+import 'package:thoth_realtime/thoth_realtime.dart';
 
 void main() {
   test('protocol frame encodes data as a JSON string', () {

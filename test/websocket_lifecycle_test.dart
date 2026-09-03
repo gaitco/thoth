@@ -5,7 +5,7 @@ import 'dart:io';
 import 'package:maat/maat.dart' show Log, PusherSigner;
 import 'package:shelf/shelf_io.dart' as shelf_io;
 import 'package:test/test.dart';
-import 'package:thoth/thoth.dart';
+import 'package:thoth_realtime/thoth_realtime.dart';
 import 'package:web_socket_channel/io.dart';
 import 'package:web_socket_channel/web_socket_channel.dart' show WebSocketSink;
 

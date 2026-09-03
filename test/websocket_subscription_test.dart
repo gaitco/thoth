@@ -5,7 +5,7 @@ import 'dart:io';
 import 'package:maat/maat.dart';
 import 'package:shelf/shelf_io.dart' as shelf_io;
 import 'package:test/test.dart';
-import 'package:thoth/thoth.dart';
+import 'package:thoth_realtime/thoth_realtime.dart';
 import 'package:web_socket_channel/io.dart';
 
 Map<String, Object?> decodeFrame(Object? raw) {

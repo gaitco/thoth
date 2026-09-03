@@ -3,7 +3,7 @@ import 'dart:io';
 
 import 'package:maat/maat.dart';
 import 'package:test/test.dart';
-import 'package:thoth/thoth.dart';
+import 'package:thoth_realtime/thoth_realtime.dart';
 import 'package:web_socket_channel/io.dart';
 
 const _config = ThothConfig(

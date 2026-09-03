@@ -6,6 +6,14 @@ Thoth is a self-hosted Pusher Protocol v7 WebSocket and HTTP server for Dart.
 It works with the official `pusher-js` client and uses Maat for channel
 authorization and signed server broadcasts.
 
+```bash
+dart pub add thoth_realtime
+```
+
+```dart
+import 'package:thoth_realtime/thoth_realtime.dart';
+```
+
 ```dart
 final app = await Application.configure(basePath: Directory.current.path)
     .withConfig({'thoth': thoth})
