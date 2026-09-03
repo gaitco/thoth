@@ -186,6 +186,16 @@ void main() {
     },
   );
 
+  test('wrong application ID returns 404 before authentication', () async {
+    const path = '/apps/wrong-id/channels';
+
+    expect((await request(server.port, 'GET', path)).$1, 404);
+    expect(
+      (await request(server.port, 'GET', path, validSignature: false)).$1,
+      404,
+    );
+  });
+
   test('signed API reports occupied channels', () async {
     final socket = await ApiSocket.connect(server.port);
     addTearDown(socket.close);

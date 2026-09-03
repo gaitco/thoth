@@ -51,17 +51,18 @@ class ThothHandler {
   }
 
   Future<Response> _handleHttp(Request request, List<String> segments) async {
+    if (segments.length < 3 || segments[1] != config.appId) {
+      return _json(404, {'error': 'Not found'});
+    }
     final body = await request.readAsString();
     final path = '/${request.url.path}';
-    if (segments.length < 3 ||
-        segments[1] != config.appId ||
-        !_signer.verifyHttpRequest(
-          method: request.method,
-          path: path,
-          body: body,
-          key: config.appKey,
-          query: request.url.queryParameters,
-        )) {
+    if (!_signer.verifyHttpRequest(
+      method: request.method,
+      path: path,
+      body: body,
+      key: config.appKey,
+      query: request.url.queryParameters,
+    )) {
       return _json(401, {'error': 'Unauthorized'});
     }
 
