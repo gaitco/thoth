@@ -63,10 +63,13 @@ class ThothHandler {
           'activity_timeout': config.activityTimeout.inSeconds,
         }),
       );
+      _resetActivity(connection);
       await for (final message in socket.stream) {
+        _resetActivity(connection);
         await _handleMessage(connection, message);
       }
     } finally {
+      connection.cancelTimers();
       await registry.disconnect(connection);
       _connectionCount--;
     }
@@ -81,6 +84,13 @@ class ThothHandler {
         jsonDecode(message! as String) as Map,
       );
       final event = frame['event'];
+      if (event == 'pusher:pong') return;
+      if (event == 'pusher:ping') {
+        await connection.send(
+          const PusherFrame('pusher:pong', <String, Object?>{}),
+        );
+        return;
+      }
       if (event == 'pusher:subscribe') {
         final data = _dataMap(frame['data']);
         final channel = data['channel'];
@@ -135,6 +145,24 @@ class ThothHandler {
         if (channel is String) await registry.unsubscribe(connection, channel);
         return;
       }
+      if (event is String && event.startsWith('client-')) {
+        final channel = frame['channel'];
+        if (!config.clientEvents ||
+            channel is! String ||
+            (!channel.startsWith('private-') &&
+                !channel.startsWith('presence-')) ||
+            !connection.channels.contains(channel)) {
+          await _error(connection, 'Client event is not allowed');
+          return;
+        }
+        await registry.publish(
+          channel,
+          event,
+          frame['data'],
+          exceptSocketId: connection.id,
+        );
+        return;
+      }
       await _error(connection, 'Unknown event');
     } on Object {
       await _error(connection, 'Malformed event');
@@ -143,6 +171,20 @@ class ThothHandler {
 
   Future<void> _error(SocketConnection connection, String message) => connection
       .send(PusherFrame('pusher:error', {'code': 4000, 'message': message}));
+
+  void _resetActivity(SocketConnection connection) {
+    connection.activityTimer?.cancel();
+    connection.pongTimer?.cancel();
+    connection.activityTimer = Timer(config.activityTimeout, () {
+      unawaited(
+        connection.send(const PusherFrame('pusher:ping', <String, Object?>{})),
+      );
+      connection.pongTimer = Timer(
+        config.pongTimeout,
+        () => unawaited(connection.close(4201, 'Pong timeout')),
+      );
+    });
+  }
 
   bool _validSubscription(
     String socketId,
